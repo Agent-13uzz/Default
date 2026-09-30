@@ -1,0 +1,20 @@
+{
+  "name": "keystone-construction",
+  "version": "1.0.0",
+  "description": "Keystone – a Procore-inspired construction management platform with a pluggable integration backend.",
+  "main": "server/index.js",
+  "private": true,
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server/index.js",
+    "dev": "node --no-warnings=ExperimentalWarning --watch server/index.js",
+    "seed": "node --no-warnings=ExperimentalWarning server/seed.js --reset",
+    "test": "node --no-warnings=ExperimentalWarning --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1"
+  }
+}
