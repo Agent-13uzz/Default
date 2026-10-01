@@ -93,8 +93,8 @@ function integrationRoutes({ auth, engine, webhooks }) {
   const r = express.Router();
 
   // Inbound webhooks are authenticated by HMAC signature, not by user session.
-  r.post('/inbound/:id', express.raw({ type: () => true, limit: '5mb' }), (req, res) => {
-    const job = engine.handleInbound(Number(req.params.id), Buffer.isBuffer(req.body) ? req.body : Buffer.from(''), req.get('x-keystone-signature'));
+  r.post('/inbound/:id', express.raw({ type: () => true, limit: '5mb' }), async (req, res) => {
+    const job = await engine.handleInbound(Number(req.params.id), Buffer.isBuffer(req.body) ? req.body : Buffer.from(''), req.get('x-keystone-signature'));
     res.json({ job_id: job.id, status: job.status, stats: job.stats, errors: job.log.filter((l) => l.level === 'error').map((l) => l.msg) });
   });
 
@@ -132,10 +132,10 @@ function integrationRoutes({ auth, engine, webhooks }) {
     res.json({ url: `${req.protocol}://${req.get('host')}/api/integrations/inbound/${c.id}`, secret: c.inbound_secret, signature_header: 'X-Keystone-Signature', algorithm: 'sha256=HMAC_SHA256(secret, raw_body) hex' });
   });
   r.post('/connections/:id/rotate-secret', (req, res) => res.json({ secret: engine.rotateInboundSecret(Number(req.params.id)) }));
-  r.get('/connections/:id/sandbox/:entity', (req, res) => res.json(engine.getSandbox(Number(req.params.id), req.params.entity)));
-  r.put('/connections/:id/sandbox/:entity', (req, res) => {
+  r.get('/connections/:id/sandbox/:entity', async (req, res) => res.json(await engine.getSandbox(Number(req.params.id), req.params.entity)));
+  r.put('/connections/:id/sandbox/:entity', async (req, res) => {
     const { remote_id: remoteId, data } = req.body || {};
-    res.json(engine.putSandboxRecord(Number(req.params.id), req.params.entity, remoteId, data || {}));
+    res.json(await engine.putSandboxRecord(Number(req.params.id), req.params.entity, remoteId, data || {}));
   });
   r.get('/connections/:id/export/:entity', (req, res) => {
     const c = engine.getConnection(Number(req.params.id));

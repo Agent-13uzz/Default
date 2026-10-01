@@ -161,6 +161,24 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS packages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  file_name TEXT,
+  file_size INTEGER,
+  storage_path TEXT NOT NULL,
+  status TEXT NOT NULL,
+  page_count INTEGER,
+  defaults TEXT NOT NULL DEFAULT '{}',
+  items TEXT NOT NULL DEFAULT '[]',
+  results TEXT,
+  error TEXT,
+  created_by INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  published_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_deliveries_pending ON webhook_deliveries(status, next_attempt_at);
 `;
 

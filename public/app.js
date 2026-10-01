@@ -147,6 +147,8 @@ async function route() {
       if (rest[0] === 'reports') return await viewReports(main, pid, rest[1], guard);
       if (rest[0] === 'team') return await viewTeam(main, pid, guard);
       if (rest[0] === 'settings') return await viewProjectSettings(main, pid);
+      if (rest[0] === 'packages' && rest[1]) return await viewPackage(main, pid, Number(rest[1]), guard);
+      if (rest[0] === 'packages') return await viewPackages(main, pid, query.kind, guard);
       if (rest[0] === 'm') return await moduleRoute(main, pid, rest.slice(1), query, guard);
     }
     main.innerHTML = '<div class="empty">Page not found.</div>';
@@ -255,7 +257,7 @@ function navLink(href, icon, label, active, extra = '') {
 }
 
 function projectNav(pid, parts) {
-  const cur = parts[2] === 'm' ? parts[3] : parts[2] || 'home';
+  const cur = parts[2] === 'm' ? parts[3] : parts[2] === 'packages' ? (parseHash().query.kind || 'drawings') : parts[2] || 'home';
   let html = navLink(`#/p/${pid}`, '🏠', 'Project Home', cur === 'home');
   for (const [gk, gl] of Object.entries(S.meta.groups)) {
     const mods = S.meta.modules.filter((m) => m.group === gk && m.scope === 'project' && can(m.key));
@@ -481,17 +483,17 @@ function cell(field, rec) {
 async function viewList(main, pid, mod, query, guard) {
   const base = pid ? `/projects/${pid}/modules/${mod.key}` : `/company/modules/${mod.key}`;
   const hrefBase = pid ? `#/p/${pid}/m/${mod.key}` : `#/m/${mod.key}`;
-  const state = { q: query.q || '', status: query.status || '', open: query.open === 'true', overdue: query.overdue === 'true', mine: query.mine === 'true', sort: query.sort || '', dir: query.dir || 'desc', view: query.view || (safeGet(`ks_view_${mod.key}`) || 'table') };
+  const state = { q: query.q || '', status: query.status || '', open: query.open ? query.open === 'true' : !!PACKAGE_KINDS[mod.key], overdue: query.overdue === 'true', mine: query.mine === 'true', sort: query.sort || '', dir: query.dir || 'desc', view: query.view || (safeGet(`ks_view_${mod.key}`) || 'table') };
   if (state.view === 'gantt' && mod.key !== 'schedule') state.view = 'table';
   const cols = listColumns(mod);
   const statusOk = mod.statuses.length > 1;
   main.innerHTML = `
     <div class="page-head"><div class="title"><div class="breadcrumb">${pid ? esc(S.projects.find((p) => p.id === pid)?.name || '') : 'Company'} · ${esc(S.meta.groups[mod.group])}</div><h1>${mod.icon} ${esc(mod.label)}</h1></div>
-      <div class="btn-row">${mod.key === 'budget' ? `<a class="btn" href="#/p/${pid}/budget">📊 Budget Overview</a>` : ''}<button class="btn" id="export">⬇ Export CSV</button>${can(mod.key, 'write') ? `<a class="btn primary" href="${hrefBase}/new">+ Create ${esc(mod.singular)}</a>` : ''}</div></div>
+      <div class="btn-row">${mod.key === 'budget' ? `<a class="btn" href="#/p/${pid}/budget">📊 Budget Overview</a>` : ''}${PACKAGE_KINDS[mod.key] && pid ? `<a class="btn" href="#/p/${pid}/packages?kind=${mod.key}">🗂 Uploads</a>${can(mod.key, 'write') ? `<button class="btn primary" id="upload-pkg">⬆ ${PACKAGE_KINDS[mod.key].upload}</button>` : ''}` : ''}<button class="btn" id="export">⬇ Export CSV</button>${can(mod.key, 'write') ? `<a class="btn primary" href="${hrefBase}/new">+ Create ${esc(mod.singular)}</a>` : ''}</div></div>
     <div class="toolbar no-print">
       <input type="search" id="q" placeholder="Search ${esc(mod.label)}…" value="${esc(state.q)}">
       ${statusOk ? `<select id="status"><option value="">All statuses</option>${mod.statuses.map((s) => `<option ${state.status === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>` : ''}
-      ${mod.closedStatuses.length ? `<label><input type="checkbox" id="open" ${state.open ? 'checked' : ''}> Open only</label>` : ''}
+      ${mod.closedStatuses.length ? `<label><input type="checkbox" id="open" ${state.open ? 'checked' : ''}> ${PACKAGE_KINDS[mod.key] ? 'Current only' : 'Open only'}</label>` : ''}
       ${mod.dueField ? `<label><input type="checkbox" id="overdue" ${state.overdue ? 'checked' : ''}> Overdue</label>` : ''}
       ${mod.assigneeFields.length ? `<label><input type="checkbox" id="mine" ${state.mine ? 'checked' : ''}> Assigned to me</label>` : ''}
       <span style="flex:1"></span>
@@ -538,6 +540,7 @@ async function viewList(main, pid, mod, query, guard) {
     $$('#views button').forEach((x) => x.classList.toggle('on', x === b));
     load();
   }));
+  $('#upload-pkg')?.addEventListener('click', () => uploadPackageModal(pid, mod.key));
   $('#export').addEventListener('click', () => download(`${base}/export.csv?${new URLSearchParams({ q: state.q, status: state.status })}`, `${mod.key}-${today()}.csv`));
   await load();
 }
@@ -976,6 +979,190 @@ async function viewReports(main, pid, key, guard) {
     ${r.summary ? `<div class="grid cols-4 kpis" style="margin-bottom:16px">${Object.entries(r.summary).map(([k, v]) => kpi(labelize(k), v == null ? '—' : num(v))).join('')}</div>` : ''}
     <div class="table-wrap"><table><thead><tr>${cols.map((c) => `<th>${esc(labelize(c))}</th>`).join('')}</tr></thead><tbody>${r.rows.map((row) => `<tr>${cols.map((c) => `<td class="${typeof row[c] === 'number' ? 'num' : ''}">${typeof row[c] === 'number' && isMoney(c) ? money(row[c]) : /date|occurred/.test(c) ? fmtDate(row[c]) : esc(row[c] ?? '')}</td>`).join('')}</tr>`).join('') || '<tr><td class="empty">No data</td></tr>'}</tbody></table></div>`;
   $('#rexport').addEventListener('click', () => downloadText(toCSV(r.rows), `${key}-${today()}.csv`));
+}
+
+// ─── Drawing set / spec book packages ─────────────────────────────────
+const PACKAGE_KINDS = {
+  drawings: { upload: 'Upload Drawing Set', noun: 'drawing set', item: 'sheet' },
+  specifications: { upload: 'Upload Spec Book', noun: 'spec book', item: 'section' },
+};
+
+function uploadPackageModal(pid, kind) {
+  const k = PACKAGE_KINDS[kind];
+  const drawings = kind === 'drawings';
+  modal(`<h2>${esc(k.upload)}</h2>
+    <p class="muted">Upload the full ${esc(k.noun)} as one PDF. Keystone reads every page's text and fills in ${drawings ? 'sheet number, title, discipline, revision and date from each title block' : 'section number, title and division for each specification section'}. You review the results before anything is published.</p>
+    <form id="pkg-form"><div class="form-grid">
+      <div class="field wide"><label>PDF file <span class="req">*</span></label><input type="file" name="file" accept="application/pdf,.pdf" required></div>
+      <div class="field"><label>${drawings ? 'Set Name' : 'Package Name'}</label><input name="name" placeholder="${drawings ? 'e.g. IFC Rev 4, Addendum 2, ASI-08' : 'e.g. Project Manual – Bid Set'}"></div>
+      <div class="field"><label>Default Revision</label><input name="revision" placeholder="Used when a ${esc(k.item)} shows no revision"></div>
+      ${drawings ? `<div class="field"><label>Drawing Date</label><input type="date" name="drawing_date"><div class="help">Used when a sheet shows no date</div></div>
+      <div class="field"><label>Received Date</label><input type="date" name="received_date" value="${today()}"></div>`
+    : `<div class="field"><label>Issued Date</label><input type="date" name="issued_date" value="${today()}"></div>`}
+    </div>
+    <div class="progress mt hidden" id="pkg-progress"><div style="width:0%"></div></div>
+    <div class="form-error mt" id="pkg-err"></div>
+    <div class="btn-row mt"><button class="btn primary" id="pkg-submit">Upload &amp; Extract</button><button type="button" class="btn" data-close>Cancel</button></div></form>`, (root, close) => {
+    $('#pkg-form', root).addEventListener('submit', (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const file = f.file.files[0];
+      if (!file) return;
+      const params = new URLSearchParams({ kind });
+      for (const key of ['name', 'revision', 'drawing_date', 'received_date', 'issued_date']) if (f[key]?.value) params.set(key, f[key].value);
+      const bar = $('#pkg-progress', root);
+      bar.classList.remove('hidden');
+      $('#pkg-submit', root).disabled = true;
+      // XHR rather than fetch so large sets show upload progress.
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/projects/${pid}/packages?${params}`);
+      xhr.setRequestHeader('Authorization', `Bearer ${S.token}`);
+      xhr.setRequestHeader('Content-Type', 'application/pdf');
+      xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
+      xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) $('div', bar).style.width = `${(ev.loaded / ev.total) * 100}%`; };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+        if (xhr.status >= 300) { $('#pkg-err', root).textContent = body.error || `Upload failed (${xhr.status})`; $('#pkg-submit', root).disabled = false; return; }
+        close();
+        location.hash = `#/p/${pid}/packages/${body.id}?kind=${kind}`;
+      };
+      xhr.onerror = () => { $('#pkg-err', root).textContent = 'Upload failed – check your connection'; $('#pkg-submit', root).disabled = false; };
+      xhr.send(file);
+    });
+  });
+}
+
+async function viewPackages(main, pid, kind, guard) {
+  const list = await api('GET', `/projects/${pid}/packages${kind ? `?kind=${kind}` : ''}`);
+  if (!guard()) return;
+  const label = kind ? S.modules[kind].label : 'Drawings & Specifications';
+  main.innerHTML = `<div class="page-head"><div class="title"><div class="breadcrumb">${kind ? `<a href="#/p/${pid}/m/${kind}">${esc(label)}</a>` : ''}</div><h1>🗂 ${esc(label)} Uploads</h1><div class="sub">Every uploaded set or spec book, with its extraction and publishing status.</div></div>
+    <div class="btn-row">${(kind ? [kind] : Object.keys(PACKAGE_KINDS)).filter((k) => can(k, 'write')).map((k) => `<button class="btn primary" data-up="${k}">⬆ ${esc(PACKAGE_KINDS[k].upload)}</button>`).join('')}</div></div>
+    <div class="table-wrap"><table><thead><tr><th>Upload</th><th>Type</th><th>File</th><th class="num">Pages</th><th class="num">Items</th><th>Status</th><th>Uploaded</th></tr></thead><tbody>
+    ${list.map((p) => `<tr class="click" data-href="#/p/${pid}/packages/${p.id}?kind=${p.kind}"><td><strong>${esc(p.name)}</strong></td><td>${esc(S.modules[p.kind].label)}</td><td>${esc(p.file_name)} <span class="muted">${(p.file_size / 1048576).toFixed(1)} MB</span></td><td class="num">${p.page_count ?? '…'}</td><td class="num">${p.item_count}</td><td>${pill(packageStatus(p.status))}</td><td>${fmtDateTime(p.created_at)} · ${esc(userName(p.created_by))}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">Nothing uploaded yet.</td></tr>'}
+    </tbody></table></div>`;
+  bindRowLinks(main);
+  $$('[data-up]', main).forEach((b) => b.addEventListener('click', () => uploadPackageModal(pid, b.dataset.up)));
+}
+
+const packageStatus = (s) => ({ processing: 'Processing', review: 'Ready for Review', publishing: 'In Progress', published: 'Published', failed: 'Failed' }[s] || s);
+
+async function viewPackage(main, pid, id, guard) {
+  let pkg = await api('GET', `/packages/${id}`);
+  if (!guard()) return;
+  const k = PACKAGE_KINDS[pkg.kind];
+  const drawings = pkg.kind === 'drawings';
+  const writable = can(pkg.kind, 'write');
+  const head = () => `<div class="page-head"><div class="title"><div class="breadcrumb"><a href="#/p/${pid}/m/${pkg.kind}">${esc(S.modules[pkg.kind].label)}</a> / <a href="#/p/${pid}/packages?kind=${pkg.kind}">Uploads</a></div>
+      <h1>${esc(pkg.name)}</h1><div class="sub">${pill(packageStatus(pkg.status))} ${esc(pkg.file_name)} · ${pkg.page_count ?? '…'} page(s) · uploaded ${fmtDateTime(pkg.created_at)} by ${esc(userName(pkg.created_by))}</div></div>
+      <div class="btn-row"><button class="btn" id="pkg-dl">⬇ Original PDF</button>${writable && ['review', 'failed'].includes(pkg.status) ? '<button class="btn" id="pkg-rerun">↻ Re-run Extraction</button>' : ''}${writable && pkg.status !== 'publishing' ? '<button class="btn danger" id="pkg-del">Delete Upload</button>' : ''}</div></div>`;
+  const bindHead = () => {
+    $('#pkg-dl').addEventListener('click', () => download(`/packages/${id}/file`, pkg.file_name));
+    $('#pkg-rerun')?.addEventListener('click', async () => { if (confirm('Re-run extraction? Your edits on this page will be replaced.')) { await api('POST', `/packages/${id}/reprocess`); route(); } });
+    $('#pkg-del')?.addEventListener('click', async () => {
+      if (!confirm(pkg.status === 'published' ? 'Delete this upload record? Published drawings/specs are kept.' : 'Discard this upload?')) return;
+      await api('DELETE', `/packages/${id}`);
+      location.hash = `#/p/${pid}/packages?kind=${pkg.kind}`;
+    });
+  };
+
+  if (pkg.status === 'processing' || pkg.status === 'publishing') {
+    main.innerHTML = `${head()}<div class="card empty">⏳ ${pkg.status === 'processing' ? `Reading ${esc(k.noun)} pages and extracting ${esc(k.item)} details…` : 'Publishing…'} This page updates automatically.</div>`;
+    bindHead();
+    setTimeout(() => { if (guard()) route(); }, 1500);
+    return;
+  }
+  if (pkg.status === 'failed') {
+    main.innerHTML = `${head()}<div class="card"><h2>Extraction failed</h2><p class="overdue">${esc(pkg.error || '')}</p><p class="muted">Make sure the file is a valid, unencrypted PDF.</p></div>`;
+    bindHead();
+    return;
+  }
+  if (pkg.status === 'published') {
+    const r = pkg.results || { created: [], superseded: [] };
+    main.innerHTML = `${head()}<div class="grid cols-3 kpis" style="margin-bottom:16px">${kpi(`${S.modules[pkg.kind].label} Published`, r.created.length, 'ok')}${kpi('Superseded', r.superseded.length)}${kpi('Skipped', pkg.items.filter((i) => !i.include).length)}</div>
+      <div class="card"><h2>Published ${esc(S.modules[pkg.kind].label)}</h2><div class="table-wrap"><table><thead><tr><th>#</th><th>${drawings ? 'Sheet' : 'Section'}</th><th>Title</th></tr></thead><tbody>
+      ${r.created.map((c) => `<tr class="click" data-href="#/p/${pid}/m/${pkg.kind}/${c.id}"><td>${esc(c.number)}</td><td><strong>${esc(c.sheet_number || c.section_number)}</strong></td><td>${esc(c.title)}</td></tr>`).join('')}</tbody></table></div>
+      ${r.superseded.length ? `<p class="muted mt">Superseded: ${r.superseded.map((x) => `<a href="#/p/${pid}/m/${pkg.kind}/${x.id}">${esc(x.number)}${x.revision ? ` (rev ${esc(x.revision)})` : ''}</a>`).join(', ')}</p>` : ''}</div>`;
+    bindHead();
+    bindRowLinks(main);
+    return;
+  }
+
+  // Review state
+  const disciplines = S.modules.drawings.fields.find((f) => f.key === 'discipline').options;
+  const conf = (item, key) => ({ high: '', low: 'warn', duplicate: 'bad', none: 'bad' }[item.confidence?.[key]] ?? '');
+  const confTip = (item, key) => ({ low: 'Low confidence – please check', duplicate: 'Same number found on another page', none: 'Not found – please enter' }[item.confidence?.[key]] || '');
+  const pageLink = (n) => `<button type="button" class="btn small" data-preview="${n}" title="Preview page ${n}">p.${n}</button>`;
+  const row = (it, i) => drawings
+    ? `<tr data-i="${i}" class="${it.include ? '' : 'excluded'}"><td><input type="checkbox" data-k="include" ${it.include ? 'checked' : ''} aria-label="Include"></td><td>${pageLink(it.page)}${it.has_text === false ? ' <span class="tag" title="No text layer – scanned image">scan</span>' : ''}</td>
+        <td><input data-k="sheet_number" value="${esc(it.sheet_number)}" class="${conf(it, 'sheet_number')}" title="${esc(confTip(it, 'sheet_number'))}" size="8"></td>
+        <td style="min-width:260px"><input data-k="title" value="${esc(it.title)}" class="${conf(it, 'title')}" title="${esc(confTip(it, 'title'))}"></td>
+        <td style="min-width:150px"><select data-k="discipline"><option value=""></option>${disciplines.map((d) => `<option ${d === it.discipline ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select></td>
+        <td><input data-k="revision" value="${esc(it.revision)}" size="3"></td><td><input type="date" data-k="drawing_date" value="${esc(it.drawing_date || '')}"></td>
+        <td>${it.existing ? `<span class="tag" title="Will mark ${esc(it.existing.number)} as Superseded">Supersedes${it.existing.revision ? ` rev ${esc(it.existing.revision)}` : ''}</span>` : '<span class="tag">New</span>'}</td></tr>`
+    : `<tr data-i="${i}" class="${it.include ? '' : 'excluded'}"><td><input type="checkbox" data-k="include" ${it.include ? 'checked' : ''} aria-label="Include"></td><td class="nowrap">${pageLink(it.start_page)}${it.end_page > it.start_page ? ` – ${it.end_page}` : ''}</td>
+        <td><input data-k="section_number" value="${esc(it.section_number)}" size="10" class="${conf(it, 'section_number')}"></td>
+        <td style="min-width:260px"><input data-k="title" value="${esc(it.title)}" class="${conf(it, 'title')}" title="${esc(confTip(it, 'title'))}"></td>
+        <td style="min-width:200px"><input data-k="division" value="${esc(it.division || '')}"></td><td><input data-k="revision" value="${esc(it.revision)}" size="3"></td>
+        <td>${it.existing ? `<span class="tag">Supersedes${it.existing.revision ? ` rev ${esc(it.existing.revision)}` : ''}</span>` : '<span class="tag">New</span>'}</td></tr>`;
+  const needs = pkg.items.filter((i) => Object.values(i.confidence || {}).some((c) => c !== 'high')).length;
+  main.innerHTML = `${head()}
+    ${pkg.error ? `<div class="card" style="border-color:var(--warn)">⚠️ ${esc(pkg.error)}</div>` : ''}
+    <div class="grid cols-4 kpis" style="margin-bottom:16px">${kpi('Pages', pkg.page_count)}${kpi(drawings ? 'Sheets Found' : 'Sections Found', pkg.items.length)}${kpi('Need Review', needs, needs ? 'bad' : 'ok', 'highlighted below')}${kpi('Will Supersede', pkg.items.filter((i) => i.existing).length)}</div>
+    ${pkg.items.length ? '' : `<div class="card empty">No ${esc(k.item)}s were detected. ${drawings ? '' : 'Spec sections are found from "SECTION 03 30 00" headers.'}</div>`}
+    <div>
+      <div class="card"><h2>Review extracted ${esc(k.item)}s <span class="right muted">Yellow = check · Red = missing or duplicate</span></h2>
+        ${writable ? `<div class="toolbar"><label>Set revision for all included: <input id="bulk-rev" size="4" style="border:1px solid var(--border);border-radius:6px;padding:5px 8px;background:var(--panel)"></label><button class="btn small" id="bulk-apply">Apply</button><span style="flex:1"></span><button class="btn small" id="sel-all">Include all</button><button class="btn small" id="sel-none">Include none</button></div>` : ''}
+        <div class="table-wrap"><table class="lines review" id="review"><thead><tr><th></th><th>Page</th>${drawings ? '<th>Sheet #</th><th>Title</th><th>Discipline</th><th>Rev</th><th>Date</th>' : '<th>Section #</th><th>Title</th><th>Division</th><th>Rev</th>'}<th></th></tr></thead>
+        <tbody>${pkg.items.map(row).join('')}</tbody></table></div>
+        <div class="form-error mt" id="rev-err"></div>
+        ${writable ? `<div class="btn-row mt"><button class="btn primary" id="publish">Publish ${pkg.items.filter((i) => i.include).length} ${esc(k.item)}(s)</button><button class="btn" id="save">Save Draft</button><span class="muted">Click a page number to compare the extracted details with the sheet.</span></div>` : ''}</div>
+    </div>`;
+  bindHead();
+  const table = $('#review');
+  const collect = () => $$('tbody tr', table).map((tr) => {
+    const o = {};
+    $$('[data-k]', tr).forEach((el) => { o[el.dataset.k] = el.type === 'checkbox' ? el.checked : el.value; });
+    return o;
+  });
+  const updateCount = () => { const n = collect().filter((i) => i.include).length; if ($('#publish')) $('#publish').textContent = `Publish ${n} ${k.item}(s)`; };
+  table.addEventListener('change', (e) => {
+    if (e.target.dataset.k === 'include') { e.target.closest('tr').classList.toggle('excluded', !e.target.checked); updateCount(); }
+    if (e.target.dataset.k === 'sheet_number') {
+      // Re-derive discipline from the sheet prefix when the user corrects the number.
+      const sel = $('[data-k="discipline"]', e.target.closest('tr'));
+      const map = { A: 'Architectural', S: 'Structural', M: 'Mechanical', P: 'Plumbing', E: 'Electrical', C: 'Civil', L: 'Landscape', G: 'General', T: 'Telecom', FP: 'Fire Protection', F: 'Fire Protection' };
+      const pre = /^([A-Z]{1,2})/.exec(e.target.value.toUpperCase())?.[1];
+      const d = map[pre] || map[pre?.[0]];
+      if (d && sel) sel.value = d;
+    }
+    e.target.classList.remove('warn', 'bad');
+  });
+  $$('[data-preview]', table).forEach((b) => b.addEventListener('click', () => {
+    const src = `/api/packages/${id}/pages/${b.dataset.preview}?access_token=${encodeURIComponent(S.token)}`;
+    modal(`<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><h2 style="margin:0">Page ${esc(b.dataset.preview)}</h2><a class="btn small" href="${src}" target="_blank" rel="noopener" style="margin-left:auto">Open in new tab ↗</a><button class="btn small" data-close>Close</button></div>
+      <iframe title="Page preview" src="${src}#view=Fit" style="width:100%;height:78vh;border:1px solid var(--border);border-radius:6px"></iframe>`, (root) => { $('.modal', root).style.width = 'min(1400px, 100%)'; });
+  }));
+  $('#bulk-apply')?.addEventListener('click', () => { const v = $('#bulk-rev').value; $$('tbody tr', table).forEach((tr) => { if ($('[data-k="include"]', tr).checked) $('[data-k="revision"]', tr).value = v; }); });
+  $('#sel-all')?.addEventListener('click', () => { $$('[data-k="include"]', table).forEach((c) => { c.checked = true; c.closest('tr').classList.remove('excluded'); }); updateCount(); });
+  $('#sel-none')?.addEventListener('click', () => { $$('[data-k="include"]', table).forEach((c) => { c.checked = false; c.closest('tr').classList.add('excluded'); }); updateCount(); });
+  const showErrors = (err) => { $('#rev-err').innerHTML = esc(err.message) + (err.errors ? `<ul>${Object.entries(err.errors).map(([a, b]) => `<li>${esc(a)}: ${esc(b)}</li>`).join('')}</ul>` : ''); };
+  $('#save')?.addEventListener('click', async () => {
+    try { pkg = await api('PATCH', `/packages/${id}`, { items: collect() }); toast('Draft saved'); route(); } catch (err) { showErrors(err); }
+  });
+  $('#publish')?.addEventListener('click', async () => {
+    const items = collect();
+    const n = items.filter((i) => i.include).length;
+    const sup = pkg.items.filter((it, i) => items[i].include && it.existing).length;
+    if (!confirm(`Publish ${n} ${k.item}(s)?${sup ? ` ${sup} existing ${k.item}(s) will be marked Superseded.` : ''}`)) return;
+    $('#publish').disabled = true;
+    try {
+      await api('POST', `/packages/${id}/publish`, { items });
+      toast(`Published ${n} ${k.item}(s)`);
+      route();
+    } catch (err) { showErrors(err); $('#publish').disabled = false; }
+  });
 }
 
 // ─── Team & project settings ──────────────────────────────────────────

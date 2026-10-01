@@ -87,6 +87,11 @@ function createWebhookDispatcher({ db, events, log = () => {}, fetchImpl = (...a
   async function deliver(d) {
     const hook = db.prepare('SELECT * FROM webhooks WHERE id = ?').get(d.webhook_id);
     if (!hook) return;
+    // Disabling a webhook also stops deliveries that were already queued or retrying.
+    if (!hook.active) {
+      db.prepare("UPDATE webhook_deliveries SET status = 'cancelled', last_error = 'Webhook disabled' WHERE id = ?").run(d.id);
+      return;
+    }
     const body = d.payload;
     const attempts = d.attempts + 1;
     let code = null;

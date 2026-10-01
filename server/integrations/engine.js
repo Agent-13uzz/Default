@@ -13,8 +13,27 @@ const MASK = '••••••';
  * sync jobs, realtime push on record events, notifier adapters, scheduled
  * syncs, inbound webhooks and sandbox (simulated remote) mode.
  */
+const PUSH_PAGE = 500;
+
 function createIntegrationEngine({ db, records, events, log = () => {} }) {
   const running = new Set();
+  const locks = new Map();
+
+  /**
+   * Serialise everything that reads-then-writes a connection's state or its
+   * external links (syncs, realtime pushes, inbound webhooks, notifier
+   * counters, sandbox edits). Each holder re-reads the connection inside the
+   * lock, so concurrent work can neither clobber saved state nor race to
+   * create the same remote record twice.
+   */
+  function withLock(connectionId, fn) {
+    const prev = locks.get(connectionId) || Promise.resolve();
+    const next = prev.then(fn, fn);
+    const tail = next.catch(() => {});
+    locks.set(connectionId, tail);
+    tail.then(() => { if (locks.get(connectionId) === tail) locks.delete(connectionId); });
+    return next;
+  }
   let timer = null;
 
   // ─── Connections ─────────────────────────────────────────────────────
@@ -369,10 +388,20 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
     return Object.entries(mapping.filter).every(([k, v]) => (Array.isArray(v) ? v.includes(rec[k]) : rec[k] === v));
   }
 
-  async function runSync(connectionId, { direction = 'both', entity = null, trigger = 'manual' } = {}) {
+  async function runSync(connectionId, opts = {}) {
+    if (!db.prepare('SELECT 1 FROM connections WHERE id = ?').get(connectionId)) throw Object.assign(new Error('Connection not found'), { status: 404 });
+    if (running.has(connectionId)) throw Object.assign(new Error('A sync is already running for this connection'), { status: 409 });
+    running.add(connectionId);
+    try {
+      return await withLock(connectionId, () => runSyncLocked(connectionId, opts));
+    } finally {
+      running.delete(connectionId);
+    }
+  }
+
+  async function runSyncLocked(connectionId, { direction = 'both', entity = null, trigger = 'manual' } = {}) {
     const row = db.prepare('SELECT * FROM connections WHERE id = ?').get(connectionId);
     if (!row) throw Object.assign(new Error('Connection not found'), { status: 404 });
-    if (running.has(connectionId)) throw Object.assign(new Error('A sync is already running for this connection'), { status: 409 });
     const conn = rowToConnection(row, { reveal: true });
     const adapter = getAdapter(conn.adapter);
     const jobId = startJob(conn.id, trigger, direction);
@@ -380,7 +409,6 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
     const logLine = (level, msg) => lines.push({ ts: new Date().toISOString(), level, msg });
     const stats = { pulled: 0, created: 0, updated: 0, pushed: 0, skipped: 0, failed: 0 };
     const ctx = makeContext(conn, (msg) => logLine('debug', msg));
-    running.add(connectionId);
     let status = 'succeeded';
     try {
       if (isSandbox(conn)) logLine('info', 'Sandbox mode: exchanging data with a simulated remote system');
@@ -391,16 +419,22 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
         if (['pull', 'both'].includes(direction) && ['pull', 'both'].includes(mapping.direction)) {
           try {
             const since = conn.state.cursors?.[mapping.entity];
+            // Take the cursor before the request so remote changes made while we pull are picked up next time.
+            const pullStartedAt = new Date().toISOString();
             const items = await remotePull(conn, adapter, ctx, mapping.entity, { since });
             logLine('info', `Pulled ${items.length} ${mapping.entity} record(s)`);
+            let itemFailures = 0;
             for (const item of items) {
               stats.pulled++;
               try { upsertFromRemote(conn, adapter, mapping, item, stats, logLine); } catch (err) {
                 stats.failed++;
+                itemFailures++;
                 logLine('error', `${mapping.entity} ${item.remoteId}: ${err.message}${err.errors ? ' ' + JSON.stringify(err.errors) : ''}`);
               }
             }
-            conn.state.cursors = { ...(conn.state.cursors || {}), [mapping.entity]: new Date().toISOString() };
+            // Keep the old cursor when records failed so they are retried on the next sync.
+            if (itemFailures) logLine('warn', `Cursor for ${mapping.entity} not advanced: ${itemFailures} record(s) will be retried`);
+            else conn.state.cursors = { ...(conn.state.cursors || {}), [mapping.entity]: pullStartedAt };
           } catch (err) {
             stats.failed++;
             logLine('error', `Pull ${mapping.entity} failed: ${err.message}`);
@@ -408,12 +442,15 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
         }
         if (['push', 'both'].includes(direction) && ['push', 'both'].includes(mapping.direction)) {
           for (const pid of projectIdsFor(conn, mod)) {
-            const { items } = records.list(mod.key, { projectId: pid, limit: 1000 });
-            for (const rec of items.filter((r) => matchesFilter(mapping, r))) {
-              try { await pushRecord(conn, adapter, ctx, mapping, rec, stats, logLine); } catch (err) {
-                stats.failed++;
-                logLine('error', `Push ${rec.number} → ${mapping.entity} failed: ${err.message}`);
+            for (let offset = 0; ; offset += PUSH_PAGE) {
+              const { items, total } = records.list(mod.key, { projectId: pid, sort: 'number', dir: 'asc', limit: PUSH_PAGE, offset, withComputed: false });
+              for (const rec of items.filter((r) => matchesFilter(mapping, r))) {
+                try { await pushRecord(conn, adapter, ctx, mapping, rec, stats, logLine); } catch (err) {
+                  stats.failed++;
+                  logLine('error', `Push ${rec.number} → ${mapping.entity} failed: ${err.message}`);
+                }
               }
+              if (offset + items.length >= total || !items.length) break;
             }
           }
         }
@@ -425,7 +462,6 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
       logLine('error', err.message);
       conn.state.last_error = err.message;
     } finally {
-      running.delete(connectionId);
       saveState(conn.id, conn.state);
       db.prepare("UPDATE connections SET last_sync_at = datetime('now') WHERE id = ?").run(conn.id);
     }
@@ -450,7 +486,11 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
    * X-Keystone-Signature: sha256=HMAC_SHA256(inbound_secret, raw_body).
    * Body: { entity, action: "upsert"|"delete", id_field?, records: [ {...} ] }
    */
-  function handleInbound(connectionId, rawBody, signature) {
+  async function handleInbound(connectionId, rawBody, signature) {
+    return withLock(Number(connectionId), () => handleInboundLocked(connectionId, rawBody, signature));
+  }
+
+  function handleInboundLocked(connectionId, rawBody, signature) {
     const conn = getConnection(connectionId, { reveal: true });
     if (!conn || !conn.enabled) throw Object.assign(new Error('Connection not found'), { status: 404 });
     if (!signature || !safeEqual(hmac(conn.inbound_secret, rawBody), signature)) {
@@ -488,48 +528,52 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
 
   // ─── Event-driven behaviour ──────────────────────────────────────────
   async function onEvent(event) {
-    const rows = db.prepare('SELECT * FROM connections WHERE enabled = 1').all();
-    for (const row of rows) {
-      const conn = rowToConnection(row, { reveal: true });
-      const adapter = getAdapter(conn.adapter);
-      if (!adapter) continue;
-      if (conn.project_id && event.project_id && conn.project_id !== event.project_id) continue;
-      try {
-        if (typeof adapter.onEvent === 'function' && !conn.mappings.length) {
-          const sent = await adapter.onEvent(makeContext(conn, () => {}), event);
-          if (sent) {
-            conn.state.events_sent = (conn.state.events_sent || 0) + 1;
-            conn.state.last_event_at = event.at;
-            conn.state.last_error = null;
-            saveState(conn.id, conn.state);
-          }
-          continue;
+    const ids = db.prepare('SELECT id FROM connections WHERE enabled = 1').all().map((r) => r.id);
+    await Promise.all(ids.map((id) => withLock(id, () => onEventForConnection(id, event))));
+  }
+
+  async function onEventForConnection(id, event) {
+    const row = db.prepare('SELECT * FROM connections WHERE id = ? AND enabled = 1').get(id);
+    if (!row) return;
+    const conn = rowToConnection(row, { reveal: true });
+    const adapter = getAdapter(conn.adapter);
+    if (!adapter) return;
+    if (conn.project_id && event.project_id && conn.project_id !== event.project_id) return;
+    try {
+      if (typeof adapter.onEvent === 'function' && !conn.mappings.length) {
+        const sent = await adapter.onEvent(makeContext(conn, () => {}), event);
+        if (sent) {
+          conn.state.events_sent = (conn.state.events_sent || 0) + 1;
+          conn.state.last_event_at = event.at;
+          conn.state.last_error = null;
+          saveState(conn.id, conn.state);
         }
-        // Realtime push – skip echoes of changes this connection itself made.
-        if (!conn.realtime || event.actor?.connection_id === conn.id || event.type.endsWith('.deleted') || event.type.endsWith('.status_changed')) continue;
-        const mapping = conn.mappings.find((m) => m.module === event.module && ['push', 'both'].includes(m.direction));
-        if (!mapping || !matchesFilter(mapping, event.record)) continue;
-        const record = records.get(event.record.id);
-        if (!record) continue;
-        const lines = [];
-        const logLine = (level, msg) => lines.push({ ts: new Date().toISOString(), level, msg });
-        const stats = { pulled: 0, created: 0, updated: 0, pushed: 0, skipped: 0, failed: 0 };
-        const jobId = startJob(conn.id, 'realtime', 'push');
-        try {
-          await pushRecord(conn, adapter, makeContext(conn, (m) => logLine('debug', m)), mapping, record, stats, logLine);
-          finishJob(jobId, 'succeeded', stats, lines);
-        } catch (err) {
-          stats.failed++;
-          logLine('error', err.message);
-          conn.state.last_error = err.message;
-          finishJob(jobId, 'failed', stats, lines);
-        }
-        saveState(conn.id, conn.state);
-      } catch (err) {
-        conn.state.last_error = err.message;
-        saveState(conn.id, conn.state);
-        log(`integration ${conn.id} event error: ${err.message}`);
+        return;
       }
+      // Realtime push – skip echoes of changes this connection itself made.
+      if (!conn.realtime || event.actor?.connection_id === conn.id || event.type.endsWith('.deleted') || event.type.endsWith('.status_changed')) return;
+      const mapping = conn.mappings.find((m) => m.module === event.module && ['push', 'both'].includes(m.direction));
+      if (!mapping || !matchesFilter(mapping, event.record)) return;
+      const record = records.get(event.record.id);
+      if (!record) return;
+      const lines = [];
+      const logLine = (level, msg) => lines.push({ ts: new Date().toISOString(), level, msg });
+      const stats = { pulled: 0, created: 0, updated: 0, pushed: 0, skipped: 0, failed: 0 };
+      const jobId = startJob(conn.id, 'realtime', 'push');
+      try {
+        await pushRecord(conn, adapter, makeContext(conn, (m) => logLine('debug', m)), mapping, record, stats, logLine);
+        finishJob(jobId, 'succeeded', stats, lines);
+      } catch (err) {
+        stats.failed++;
+        logLine('error', err.message);
+        conn.state.last_error = err.message;
+        finishJob(jobId, 'failed', stats, lines);
+      }
+      saveState(conn.id, conn.state);
+    } catch (err) {
+      conn.state.last_error = err.message;
+      saveState(conn.id, conn.state);
+      log(`integration ${conn.id} event error: ${err.message}`);
     }
   }
 
@@ -558,6 +602,10 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
 
   // ─── Sandbox inspection (lets admins simulate remote-side edits) ─────
   function getSandbox(connectionId, entity) {
+    return withLock(Number(connectionId), () => getSandboxLocked(connectionId, entity));
+  }
+
+  function getSandboxLocked(connectionId, entity) {
     const conn = getConnection(connectionId, { reveal: true });
     if (!conn) throw Object.assign(new Error('Connection not found'), { status: 404 });
     const store = sandboxStore(conn, getAdapter(conn.adapter), entity);
@@ -566,6 +614,10 @@ function createIntegrationEngine({ db, records, events, log = () => {} }) {
   }
 
   function putSandboxRecord(connectionId, entity, remoteId, data) {
+    return withLock(Number(connectionId), () => putSandboxRecordLocked(connectionId, entity, remoteId, data));
+  }
+
+  function putSandboxRecordLocked(connectionId, entity, remoteId, data) {
     const conn = getConnection(connectionId, { reveal: true });
     if (!conn?.sandbox) throw Object.assign(new Error('Connection is not in sandbox mode'), { status: 409 });
     const store = sandboxStore(conn, getAdapter(conn.adapter), entity);
