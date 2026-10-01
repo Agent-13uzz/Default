@@ -85,6 +85,31 @@ function coreRoutes({ db, auth, records, uploadsDir }) {
   // ─── Projects ────────────────────────────────────────────────────────
   const projectFields = ['number', 'name', 'stage', 'address', 'city', 'state', 'zip', 'start_date', 'completion_date', 'contract_value', 'project_type', 'description', 'active'];
 
+  /** Validate and coerce project fields into values SQLite accepts; bad input is a 422, not a 500. */
+  function projectValues(body) {
+    const out = {};
+    const errors = {};
+    for (const f of projectFields) {
+      let v = body[f];
+      if (v === undefined) continue;
+      if (v === '' ) v = null;
+      if (f === 'active') v = v === true || v === 1 || v === '1' || v === 'true' ? 1 : 0;
+      else if (f === 'contract_value') {
+        if (v != null && !Number.isFinite(Number(v))) { errors[f] = 'must be a number'; continue; }
+        if (v != null) v = Number(v);
+      } else if (['start_date', 'completion_date'].includes(f)) {
+        if (v != null && (!/^\d{4}-\d{2}-\d{2}$/.test(String(v)) || Number.isNaN(Date.parse(v)))) { errors[f] = 'must be a date (YYYY-MM-DD)'; continue; }
+      } else if (v != null) {
+        if (typeof v === 'object') { errors[f] = 'must be text'; continue; }
+        v = String(v).slice(0, 2000);
+      }
+      out[f] = v;
+    }
+    if (out.name === null) errors.name = 'is required';
+    if (Object.keys(errors).length) throw Object.assign(httpError(422, 'Validation failed'), { errors });
+    return out;
+  }
+
   function projectsFor(user) {
     return user.role === 'admin'
       ? db.prepare('SELECT * FROM projects ORDER BY active DESC, name').all()
@@ -98,8 +123,9 @@ function coreRoutes({ db, auth, records, uploadsDir }) {
     if (!['admin', 'manager'].includes(req.user.role)) throw httpError(403, 'Only admins and project managers can create projects');
     const b = req.body || {};
     if (!b.name) throw Object.assign(httpError(422, 'Validation failed'), { errors: { name: 'is required' } });
-    const cols = projectFields.filter((f) => b[f] !== undefined);
-    const info = db.prepare(`INSERT INTO projects (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => b[c]));
+    const values = projectValues(b);
+    const cols = Object.keys(values);
+    const info = db.prepare(`INSERT INTO projects (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`).run(...cols.map((c) => values[c]));
     const pid = Number(info.lastInsertRowid);
     db.prepare('INSERT OR IGNORE INTO project_members (project_id, user_id) VALUES (?, ?)').run(pid, req.user.id);
     db.prepare('INSERT INTO audit_log (user_id, actor, action, project_id, summary) VALUES (?, ?, ?, ?, ?)').run(req.user.id, req.user.name, 'created', pid, `Created project ${b.name}`);
@@ -115,9 +141,10 @@ function coreRoutes({ db, auth, records, uploadsDir }) {
     assertWriteScope(req);
     const pid = assertProject(req, req.params.pid);
     if (!['admin', 'manager'].includes(req.user.role)) throw httpError(403, 'Only admins and project managers can edit projects');
-    const cols = projectFields.filter((f) => req.body?.[f] !== undefined);
+    const values = projectValues(req.body || {});
+    const cols = Object.keys(values);
     if (cols.length) {
-      db.prepare(`UPDATE projects SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`).run(...cols.map((c) => (typeof req.body[c] === 'boolean' ? Number(req.body[c]) : req.body[c])), pid);
+      db.prepare(`UPDATE projects SET ${cols.map((c) => `${c} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`).run(...cols.map((c) => values[c]), pid);
     }
     res.json(db.prepare('SELECT * FROM projects WHERE id = ?').get(pid));
   });

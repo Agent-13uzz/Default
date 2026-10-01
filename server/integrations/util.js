@@ -11,8 +11,9 @@ function getPath(obj, path) {
 function setPath(obj, path, value) {
   const keys = String(path).split('.');
   let cur = obj;
-  keys.slice(0, -1).forEach((k) => {
-    if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = {};
+  // A numeric next segment creates an array, so "Line.0.Amount" yields { Line: [{ Amount }] }.
+  keys.slice(0, -1).forEach((k, i) => {
+    if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = /^\d+$/.test(keys[i + 1]) ? [] : {};
     cur = cur[k];
   });
   cur[keys[keys.length - 1]] = value;

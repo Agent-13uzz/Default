@@ -117,10 +117,14 @@ function createRecordService({ db, events }) {
     for (const field of mod.fields) {
       let value = input[field.key];
       if (value === undefined && !partial && field.default !== undefined) value = field.default;
+      // Conditions use the already-normalised value (fields are validated in order).
+      const visible = !field.showIf || (out[field.showIf.field] ?? input[field.showIf.field] ?? null) === field.showIf.equals;
+      // A hidden conditional field is cleared so stale values (e.g. the commitment of a change order that
+      // was switched to the prime contract) can't keep affecting totals.
+      if (!visible && !partial) value = null;
       const v = coerceValue(field, value, { projectId }, errors, field.key);
       if (v !== undefined) out[field.key] = v;
       const missing = v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length);
-      const visible = !field.showIf || (input[field.showIf.field] ?? null) === field.showIf.equals;
       if (field.required && visible && missing && (!partial || value !== undefined) && !errors[field.key]) {
         errors[field.key] = 'is required';
       }
@@ -306,7 +310,9 @@ function createRecordService({ db, events }) {
   }
 
   function actorInfo(actor) {
-    return actor ? { user_id: actor.user_id ?? null, name: actor.name, source: actor.source || 'web' } : null;
+    if (!actor) return null;
+    // connection_id lets the integration engine recognise (and not re-push) changes it made itself.
+    return { user_id: actor.user_id ?? null, name: actor.name, source: actor.source || 'web', ...(actor.connection_id != null ? { connection_id: actor.connection_id } : {}) };
   }
 
   return { list, get, getRow, create, update, remove, validate, hydrate, audit };

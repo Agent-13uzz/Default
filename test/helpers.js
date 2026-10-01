@@ -57,7 +57,7 @@ async function startApp() {
   return { ctx, base, request, login, as, stop };
 }
 
-/** Tiny HTTP server that records requests and replies via a handler. */
+/** Tiny HTTP server that records requests and replies via a handler ({ status, body, delay? }). */
 async function mockServer(handler) {
   const calls = [];
   const server = http.createServer((req, res) => {
@@ -67,8 +67,11 @@ async function mockServer(handler) {
       const call = { method: req.method, url: req.url, headers: req.headers, body: data, json: (() => { try { return JSON.parse(data); } catch { return null; } })() };
       calls.push(call);
       const out = handler ? handler(call) : { status: 200, body: { ok: true } };
-      res.writeHead(out.status || 200, { 'Content-Type': 'application/json' });
-      res.end(typeof out.body === 'string' ? out.body : JSON.stringify(out.body ?? {}));
+      const send = () => {
+        res.writeHead(out.status || 200, { 'Content-Type': 'application/json' });
+        res.end(typeof out.body === 'string' ? out.body : JSON.stringify(out.body ?? {}));
+      };
+      if (out.delay) setTimeout(send, out.delay); else send();
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));

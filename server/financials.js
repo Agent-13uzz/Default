@@ -22,8 +22,11 @@ function projectRecords(db, projectId, module) {
 
 function contractSummary(db, contractModule, record) {
   const refField = contractModule === 'prime_contracts' ? 'prime_contract' : 'commitment';
-  const cos = projectRecords(db, record.project_id, 'change_orders').filter((co) => co[refField] === record.id);
-  const invoices = projectRecords(db, record.project_id, 'invoices').filter((inv) => inv[refField] === record.id);
+  const kind = contractModule === 'prime_contracts' ? 'Prime Contract' : 'Commitment';
+  // Match on contract kind as well as the reference, consistent with the budget report.
+  const belongs = (r) => r.contract_kind === kind && r[refField] === record.id;
+  const cos = projectRecords(db, record.project_id, 'change_orders').filter(belongs);
+  const invoices = projectRecords(db, record.project_id, 'invoices').filter(belongs);
   const original = sumLines(record.line_items);
   const approved = round(cos.filter((c) => c.status === 'Approved').reduce((s, c) => s + sumLines(c.line_items), 0));
   const pending = round(cos.filter((c) => PENDING_CO.includes(c.status)).reduce((s, c) => s + sumLines(c.line_items), 0));

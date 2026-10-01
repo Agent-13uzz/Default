@@ -211,7 +211,7 @@ const docusign = {
       key: 'envelopes', label: 'Envelopes (Commitments)', module: 'commitments', directions: ['push', 'pull'], createMissing: false,
       filter: { status: 'Out for Signature' },
       fields: [
-        { local: 'title', remote: 'emailSubject' },
+        { local: 'title', remote: 'emailSubject', direction: 'push' },
         { local: 'vendor', remote: 'signer.email', transform: 'company_email' },
         { local: 'vendor', remote: 'signer.name', transform: 'company_name' },
         { local: 'scope', remote: 'document.body' },
@@ -236,7 +236,7 @@ const docusign = {
     if (!email) throw new Error('No signer email: set the vendor email in the Directory or a fallback signer');
     const html = `<h1>${payload.emailSubject || 'Contract'}</h1><pre>${String(payload.document?.body || '').replace(/</g, '&lt;')}</pre><p>Signature: <span style="color:white">/sn1/</span></p>`;
     const created = await this.http(ctx).post('/envelopes', {
-      emailSubject: `Please sign: ${payload.emailSubject}`,
+      emailSubject: payload.emailSubject || 'Contract for signature',
       documents: [{ documentBase64: Buffer.from(html).toString('base64'), name: payload.emailSubject || 'Contract', fileExtension: 'html', documentId: '1' }],
       recipients: { signers: [{ email, name: payload.signer?.name || email, recipientId: '1', routingOrder: '1', tabs: { signHereTabs: [{ anchorString: '/sn1/' }] } }] },
       status: 'sent',
