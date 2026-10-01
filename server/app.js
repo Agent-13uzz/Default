@@ -9,6 +9,8 @@ const { createIntegrationEngine } = require('./integrations/engine');
 const { createWebhookDispatcher } = require('./integrations/webhooks');
 const { coreRoutes } = require('./routes/core');
 const { adminRoutes, integrationRoutes } = require('./routes/admin');
+const { packageRoutes } = require('./routes/packages');
+const { createPackageService } = require('./packages');
 
 /**
  * Builds the application. Returned services are exposed so tests and the
@@ -22,6 +24,8 @@ function createApp({ dbFile, uploadsDir, background = true, logger = console } =
   const log = (msg) => logger.warn?.(`[keystone] ${msg}`);
   const engine = createIntegrationEngine({ db, records, events, log });
   const webhooks = createWebhookDispatcher({ db, events, log });
+  const uploads = uploadsDir || process.env.KEYSTONE_UPLOADS || path.join(__dirname, '..', 'data', 'uploads');
+  const packages = createPackageService({ db, records, uploadsDir: uploads, log });
   engine.start({ schedulerMs: background ? 60000 : 0 });
   webhooks.start({ intervalMs: background ? 15000 : 0 });
 
@@ -34,10 +38,10 @@ function createApp({ dbFile, uploadsDir, background = true, logger = console } =
     next();
   });
 
-  const uploads = uploadsDir || process.env.KEYSTONE_UPLOADS || path.join(__dirname, '..', 'data', 'uploads');
   // Integration inbound endpoint needs the raw body for signature checks, so mount before JSON parsing.
   app.use('/api/integrations', (req, res, next) => (req.path.startsWith('/inbound/') ? next() : express.json({ limit: '5mb' })(req, res, next)), integrationRoutes({ auth, engine, webhooks }));
   app.use('/api/admin', express.json({ limit: '1mb' }), adminRoutes({ db, auth }));
+  app.use('/api', packageRoutes({ auth, packages }));
   app.use('/api', (req, res, next) => (/^\/records\/\d+\/files$/.test(req.path) && req.method === 'POST' ? next() : express.json({ limit: '5mb' })(req, res, next)), coreRoutes({ db, auth, records, uploadsDir: uploads }));
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
@@ -57,7 +61,7 @@ function createApp({ dbFile, uploadsDir, background = true, logger = console } =
     db.close();
   };
 
-  return { app, db, auth, events, records, engine, webhooks, close };
+  return { app, db, auth, events, records, engine, webhooks, packages, close };
 }
 
 module.exports = { createApp };
