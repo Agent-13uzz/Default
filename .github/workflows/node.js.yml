@@ -5,9 +5,9 @@ name: Node.js CI
 
 on:
   push:
-    branches: [ "claude/procore-inspired-platform-6qawmd" ]
+    branches: [ "main", "claude/procore-inspired-platform-6qawmd" ]
   pull_request:
-    branches: [ "claude/procore-inspired-platform-6qawmd" ]
+    branches: [ "main", "claude/procore-inspired-platform-6qawmd" ]
 
 jobs:
   build:
